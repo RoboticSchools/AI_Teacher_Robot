@@ -386,7 +386,10 @@ class ListenWorker(QThread):
             self.stopped.emit()
 
     def stop(self):
-        self.is_running = False
+        try:
+            self.is_running = False
+        except Exception as e:
+            print(f"Error stopping ListenWorker: {e}")
 
 
 # ==================================================================================
@@ -544,10 +547,10 @@ class StartupWorker(QThread):
         ]
 
         tasks = []
-        for i, p in enumerate(closing_phrases): tasks.append((p, f"closing_{i}.mp3"))
-        for i, p in enumerate(opening_phrases): tasks.append((p, f"opening_{i}.mp3"))
-        for i, p in enumerate(win_phrases): tasks.append((p, f"win_exp_{i}.mp3"))
-        for i, p in enumerate(lose_phrases): tasks.append((p, f"lose_exp_{i}.mp3"))
+        for i, p in enumerate(closing_phrases): tasks.append((p, f"sounds/closing_{i}.mp3"))
+        for i, p in enumerate(opening_phrases): tasks.append((p, f"sounds/opening_{i}.mp3"))
+        for i, p in enumerate(win_phrases): tasks.append((p, f"sounds/win_exp_{i}.mp3"))
+        for i, p in enumerate(lose_phrases): tasks.append((p, f"sounds/lose_exp_{i}.mp3"))
 
         try:
             client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
@@ -611,6 +614,7 @@ class TeacherGUI(QMainWindow):
         self.is_audio_paused = False
         self.is_audio_generating = False
         self.last_generated_audio_text = ""
+        self.voice_worker = None
         
         # --- Doubt/Listening State ---
         self.listen_worker = None
@@ -702,8 +706,8 @@ class TeacherGUI(QMainWindow):
         lbl = QLabel()
         lbl.setAlignment(Qt.AlignCenter) 
         
-        if os.path.exists("logo.png"):
-            pix = QPixmap("logo.png")
+        if os.path.exists("assets/logo.png"):
+            pix = QPixmap("assets/logo.png")
             # Scale to fit the ENTIRE container (110x50)
             scaled_pix = pix.scaled(100, 45, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             lbl.setPixmap(scaled_pix) 
@@ -737,11 +741,7 @@ class TeacherGUI(QMainWindow):
 
 
 
-    def closeEvent(self, event):
-        self.servos.cleanup()
-        if self.gesture_worker:
-            self.gesture_worker.stop()
-        event.accept()
+
 
     def setup_title(self):
         # Create a top bar widget for Logo + Title
@@ -1593,9 +1593,9 @@ class TeacherGUI(QMainWindow):
         if user_idx == correct_idx:
             # Score increment moved here for clarity, though it was already done logic-wise
             self.score += 1
-            files_list = [f for f in os.listdir('.') if f.startswith('win_exp_') and f.endswith('.mp3') and os.path.getsize(f) > 100]
+            files_list = [os.path.join('sounds', f) for f in os.listdir('sounds') if f.startswith('win_exp_') and f.endswith('.mp3') and os.path.getsize(os.path.join('sounds', f)) > 100]
         else:
-            files_list = [f for f in os.listdir('.') if f.startswith('lose_exp_') and f.endswith('.mp3') and os.path.getsize(f) > 100]
+            files_list = [os.path.join('sounds', f) for f in os.listdir('sounds') if f.startswith('lose_exp_') and f.endswith('.mp3') and os.path.getsize(os.path.join('sounds', f)) > 100]
             
         if files_list:
             audio_file = random.choice(files_list)
@@ -1675,12 +1675,12 @@ class TeacherGUI(QMainWindow):
             return
 
         # Check if we already have the file for this exact text
-        if self.last_generated_audio_text == current_text and os.path.exists("output.mp3"):
-             self.play_audio_file("output.mp3")
+        if self.last_generated_audio_text == current_text and os.path.exists("sounds/output.mp3"):
+             self.play_audio_file("sounds/output.mp3")
         else:
              self.voice_btn.setText("Generating...")
              self.is_audio_generating = True
-             self.voice_worker = VoiceWorker(current_text, "output.mp3")
+             self.voice_worker = VoiceWorker(current_text, "sounds/output.mp3")
              self.voice_worker.finished.connect(self.on_audio_generated)
              self.voice_worker.error_occurred.connect(self.on_audio_error)
              self.voice_worker.start()
@@ -1688,7 +1688,7 @@ class TeacherGUI(QMainWindow):
     def on_audio_generated(self):
         self.is_audio_generating = False
         self.last_generated_audio_text = self.result_area.toPlainText()
-        self.play_audio_file("output.mp3")
+        self.play_audio_file("sounds/output.mp3")
         
     def on_audio_error(self, err):
         self.is_audio_generating = False
@@ -1742,7 +1742,7 @@ class TeacherGUI(QMainWindow):
         ]
         msg = random.choice(opening_phrases)
         msg_index = opening_phrases.index(msg)
-        filename = f"opening_{msg_index}.mp3"
+        filename = f"sounds/opening_{msg_index}.mp3"
         
         # We need to show the doubt widget immediately so the user knows something is happening
         self.doubt_widget.show()
@@ -1805,10 +1805,25 @@ class TeacherGUI(QMainWindow):
         # Stop any pending resume timers
         if hasattr(self, 'resume_timer') and self.resume_timer.isActive():
             self.resume_timer.stop()
+        
+        # Stop any pending close timers
+        if hasattr(self, 'close_timer') and self.close_timer.isActive():
+            self.close_timer.stop()
+        
+        # Stop any pending opening timers
+        if hasattr(self, 'opening_timer') and self.opening_timer.isActive():
+            self.opening_timer.stop()
 
+        # Properly stop and cleanup listen worker
         if self.listen_worker:
             self.listen_worker.stop()
+            self.listen_worker.wait(2000)  # Wait up to 2 seconds for thread to finish
             self.listen_worker = None
+        
+        # Cleanup doubt AI worker
+        if self.doubt_ai_worker and self.doubt_ai_worker.isRunning():
+            self.doubt_ai_worker.wait(1000)
+            self.doubt_ai_worker = None
         
         self.is_listening_active = False
         self.doubt_widget.hide()
@@ -1861,8 +1876,8 @@ class TeacherGUI(QMainWindow):
 
     def play_doubt_audio_response(self, text):
         if text:
-             self.voice_worker = VoiceWorker(text, "doubt_output.mp3")
-             self.voice_worker.finished.connect(lambda: self.play_audio_and_resume("doubt_output.mp3"))
+             self.voice_worker = VoiceWorker(text, "sounds/doubt_output.mp3")
+             self.voice_worker.finished.connect(lambda: self.play_audio_and_resume("sounds/doubt_output.mp3"))
              self.voice_worker.start()
 
     def play_audio_and_resume(self, filename):
@@ -1898,7 +1913,7 @@ class TeacherGUI(QMainWindow):
         ]
         msg = random.choice(closing_phrases)
         msg_index = closing_phrases.index(msg)
-        filename = f"closing_{msg_index}.mp3"
+        filename = f"sounds/closing_{msg_index}.mp3"
         
         self.doubt_chat.append(f"\n<b>AI:</b> {msg}")
 
@@ -2002,7 +2017,7 @@ class TeacherGUI(QMainWindow):
             pygame.mixer.music.play()
             
             # Update UI based on which file it is
-            if filename == "output.mp3":
+            if filename == "sounds/output.mp3":
                 self.voice_btn.setText("⏸ Pause")
                 self.audio_timer.start()
         except Exception as e:
@@ -2024,10 +2039,45 @@ class TeacherGUI(QMainWindow):
     
     def closeEvent(self, event):
         """Cleanup on app exit."""
-        self.stop_audio()
-        self.close_doubt_session()
-        self.servos.cleanup() # Wait, double cleanup?
-        event.accept()
+        try:
+            # Stop all audio
+            self.stop_audio()
+            
+            # Close doubt session properly
+            self.close_doubt_session()
+            
+            # Stop all timers
+            if hasattr(self, 'audio_timer'):
+                self.audio_timer.stop()
+            if hasattr(self, 'blink_timer'):
+                self.blink_timer.stop()
+            if hasattr(self, 'quiz_wait_timer') and hasattr(self.quiz_wait_timer, 'isActive') and self.quiz_wait_timer.isActive():
+                self.quiz_wait_timer.stop()
+            
+            # Stop and cleanup all workers
+            if self.worker and self.worker.isRunning():
+                self.worker.terminate()
+                self.worker.wait(1000)
+            
+            if self.quiz_worker and self.quiz_worker.isRunning():
+                self.quiz_worker.terminate()
+                self.quiz_worker.wait(1000)
+            
+            if self.voice_worker and self.voice_worker.isRunning():
+                self.voice_worker.wait(1000)
+            
+            # Stop gesture worker
+            if self.gesture_worker and self.gesture_worker.isRunning():
+                self.gesture_worker.stop()
+                self.gesture_worker.wait(2000)
+            
+            # Cleanup servos
+            self.servos.cleanup()
+            
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
+        finally:
+            event.accept()
 
 # ==================================================================================
 #                                 MAIN EXECUTION
